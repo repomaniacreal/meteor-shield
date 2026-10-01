@@ -61,7 +61,7 @@
     <button id="pauseBtn" title="Pause">⏸</button>
   </div>
   <div id="stage"><canvas id="game"></canvas></div>
-  <div id="hint">Hold <b>◀ ▶</b> or press the left / right side of the screen to rotate your shield.<br>Block every meteor — don't let them hit your planet!</div>
+  <div id="hint">Hold <b>◀ ▶</b> or press the left / right side of the screen to rotate your shield.<br>Block every meteor — don't let them hit your planet!<br>⚠️ Watch the edge arrows for incoming meteors!</div>
   <div id="controls">
     <button class="ctl" id="btnL">◀</button>
     <button class="ctl" id="btnR">▶</button>
@@ -74,8 +74,19 @@ const ctx = cv.getContext('2d');
 const W = 400, H = 520;
 cv.width = W; cv.height = H;
 const CX = W / 2, CY = H / 2 - 10;
-const SHIELD_R = 66, SHIELD_ARC = 1.55, PLAYER_R = 22;
+const SHIELD_R = 66, SHIELD_ARC = 1.7, PLAYER_R = 22;
 const ROT_SPEED = 6.0;
+
+/* meteor type colors: [inner, mid, outer], glow */
+const MCOL = {
+  normal:   { g: ['#ffb37a', '#e05a2b', '#7a2b12'], glow: '#ff7a2d' },
+  speeder:  { g: ['#c9f4ff', '#4dd8ff', '#0e6ea8'], glow: '#4dd8ff' },
+  tank:     { g: ['#ff9d9d', '#c0263c', '#5e0f1d'], glow: '#ff4d5e' },
+  splitter: { g: ['#e3c2ff', '#b45cff', '#5b1fa8'], glow: '#b45cff' },
+  mini:     { g: ['#ffd27a', '#ff9a3d', '#a85a12'], glow: '#ff9a3d' },
+  golden:   { g: ['#fff6c9', '#ffd94d', '#b8860b'], glow: '#ffd94d' }
+};
+function typeCol(m) { return MCOL[m.type] || MCOL.normal; }
 
 /* ---------- audio ---------- */
 let AC = null;
@@ -122,7 +133,7 @@ let lives = 3, level = 1, combo = 0, blocks = 0;
 let shieldAngle = -Math.PI / 2;
 let meteors = [], parts = [], popups = [], stars = [];
 let spawnT = 0, spawnGap = 0.95, speedMul = 1;
-let shake = 0, flash = 0, nextLifeAt = 2500, newBest = false;
+let shake = 0, flash = 0, nextLifeAt = 2500, newBest = false, danger = 0;
 let rot = { left: false, right: false };
 let time = 0;
 
@@ -135,7 +146,7 @@ function reset() {
   shieldAngle = -Math.PI / 2;
   meteors = []; parts = []; popups = [];
   spawnT = 0.4; spawnGap = 0.95; speedMul = 1;
-  shake = 0; flash = 0; nextLifeAt = 2500; newBest = false;
+  shake = 0; flash = 0; nextLifeAt = 2500; newBest = false; danger = 0;
   updateHUD();
 }
 function startGame() { audio(); reset(); state = 'playing'; sfx.start(); }
@@ -165,25 +176,37 @@ function spawnMeteor() {
   const a = Math.random() * Math.PI * 2;
   const dist = 400;
   const x = CX + Math.cos(a) * dist, y = CY + Math.sin(a) * dist;
-  const golden = Math.random() < 0.06;
-  const sp = (125 + Math.random() * 45 + (level - 1) * 16) * speedMul;
+  const roll = Math.random();
+  let type = 'normal';
+  if (roll < 0.06) type = 'golden';
+  else if (roll < 0.15) type = 'splitter';
+  else if (roll < 0.23) type = 'tank';
+  else if (roll < 0.38) type = 'speeder';
+  const P = {
+    normal:   { rmin: 10, rmax: 17, spd: 1.0,  pts: 10 },
+    speeder:  { rmin: 7,  rmax: 9,  spd: 1.55, pts: 15 },
+    tank:     { rmin: 18, rmax: 22, spd: 0.6,  pts: 30 },
+    splitter: { rmin: 12, rmax: 14, spd: 1.0,  pts: 20 },
+    golden:   { rmin: 14, rmax: 16, spd: 1.0,  pts: 10 }
+  }[type];
+  const sp = (125 + Math.random() * 45 + (level - 1) * 16) * speedMul * P.spd;
   meteors.push({
     x, y, vx: -Math.cos(a) * sp, vy: -Math.sin(a) * sp,
-    r: golden ? 15 : 10 + Math.random() * 7,
-    golden, spin: Math.random() * 6.28, passed: false,
-    hue: 8 + Math.random() * 22
+    r: P.rmin + Math.random() * (P.rmax - P.rmin),
+    type, pts: P.pts, spin: Math.random() * 6.28, passed: false, split: false
   });
 }
 function blockMeteor(m, idx) {
-  const gain = 10 + combo;
+  const gain = (m.pts || 10) + combo;
+  const isGold = m.type === 'golden';
   score += gain; combo++; blocks++;
   const ma = Math.atan2(m.y - CY, m.x - CX);
   const bx = CX + Math.cos(ma) * SHIELD_R, by = CY + Math.sin(ma) * SHIELD_R;
-  boom(bx, by, m.golden ? '#ffd94d' : '#ff9a3d', m.golden ? 30 : 16, 200);
-  addPopup(bx, by - 14, '+' + gain, m.golden ? '#ffd94d' : '#fff');
+  boom(bx, by, isGold ? '#ffd94d' : '#ff9a3d', m.type === 'tank' ? 26 : (isGold ? 30 : 16), 200);
+  addPopup(bx, by - 14, '+' + gain, isGold ? '#ffd94d' : '#fff');
   sfx.block(combo);
-  shake = Math.max(shake, 3);
-  if (m.golden) {
+  shake = Math.max(shake, m.type === 'tank' ? 6 : 3);
+  if (isGold) {
     sfx.golden();
     addPopup(CX, CY - 110, 'SHOCKWAVE!', '#ffd94d', 26);
     boom(CX, CY, '#ffd94d', 40, 320);
@@ -198,7 +221,7 @@ function blockMeteor(m, idx) {
   }
   if (blocks >= 20) {
     blocks = 0; level++;
-    spawnGap = Math.max(0.28, spawnGap * 0.88);
+    spawnGap = Math.max(0.32, spawnGap * 0.88);
     speedMul += 0.08;
     addPopup(CX, CY - 140, 'LEVEL ' + level + '!', '#4da6ff', 28);
     sfx.level();
@@ -212,7 +235,7 @@ function blockMeteor(m, idx) {
   updateHUD();
 }
 function hitPlayer(m) {
-  lives--; combo = 0;
+  lives--; combo = Math.floor(combo / 2);
   boom(m.x, m.y, '#ff4d4d', 26, 240);
   flash = 0.55;
   sfx.hit();
@@ -239,10 +262,22 @@ function update(dt) {
     const m = meteors[i];
     m.x += m.vx * dt; m.y += m.vy * dt; m.spin += dt * 4;
     if (Math.random() < 0.5) {
-      parts.push({ x: m.x - m.vx * 0.03, y: m.y - m.vy * 0.03, vx: -m.vx * 0.1 + (Math.random() - 0.5) * 40, vy: -m.vy * 0.1 + (Math.random() - 0.5) * 40, r: 1 + Math.random() * 2.5, life: 0.7, color: m.golden ? '#ffd94d' : '#ff7a2d' });
+      parts.push({ x: m.x - m.vx * 0.03, y: m.y - m.vy * 0.03, vx: -m.vx * 0.1 + (Math.random() - 0.5) * 40, vy: -m.vy * 0.1 + (Math.random() - 0.5) * 40, r: 1 + Math.random() * 2.5, life: 0.7, color: typeCol(m).glow });
     }
     const dx = m.x - CX, dy = m.y - CY;
     const d = Math.hypot(dx, dy);
+    if (m.type === 'splitter' && !m.split && d < 200) {
+      m.split = true;
+      const sa = Math.atan2(dy, dx);
+      for (const off of [-0.35, 0.35]) {
+        const a2 = sa + off, sp2 = 175 * speedMul;
+        meteors.push({ x: m.x, y: m.y, vx: -Math.cos(a2) * sp2, vy: -Math.sin(a2) * sp2, r: 7, type: 'mini', pts: 12, spin: Math.random() * 6.28, passed: false });
+      }
+      boom(m.x, m.y, '#b45cff', 14, 170);
+      addPopup(m.x, m.y - 14, 'SPLIT!', '#b45cff');
+      meteors.splice(i, 1);
+      continue;
+    }
     if (!m.passed && d <= SHIELD_R + m.r) {
       const ma = Math.atan2(dy, dx);
       if (Math.abs(normAngle(ma - shieldAngle)) <= SHIELD_ARC / 2) {
@@ -259,6 +294,9 @@ function update(dt) {
     }
     if (d > 460) meteors.splice(i, 1);
   }
+  let near = false;
+  for (const m of meteors) { if (Math.hypot(m.x - CX, m.y - CY) < 130) { near = true; break; } }
+  danger += ((near ? 1 : 0) - danger) * Math.min(1, dt * 5);
   for (let i = parts.length - 1; i >= 0; i--) {
     const p = parts[i];
     p.x += p.vx * dt; p.y += p.vy * dt; p.vx *= 0.98; p.vy *= 0.98; p.life -= dt * 1.6;
@@ -279,9 +317,9 @@ function drawMeteor(m) {
   ctx.save();
   ctx.translate(m.x, m.y);
   ctx.rotate(m.spin);
+  const c = typeCol(m);
   const g = ctx.createRadialGradient(0, 0, 1, 0, 0, m.r);
-  if (m.golden) { g.addColorStop(0, '#fff6c9'); g.addColorStop(0.5, '#ffd94d'); g.addColorStop(1, '#b8860b'); }
-  else { g.addColorStop(0, '#ffb37a'); g.addColorStop(0.5, '#e05a2b'); g.addColorStop(1, '#7a2b12'); }
+  g.addColorStop(0, c.g[0]); g.addColorStop(0.5, c.g[1]); g.addColorStop(1, c.g[2]);
   ctx.fillStyle = g;
   ctx.beginPath();
   const n = 8;
@@ -291,7 +329,7 @@ function drawMeteor(m) {
     i ? ctx.lineTo(Math.cos(a) * rr, Math.sin(a) * rr) : ctx.moveTo(Math.cos(a) * rr, Math.sin(a) * rr);
   }
   ctx.closePath(); ctx.fill();
-  ctx.shadowColor = m.golden ? '#ffd94d' : '#ff7a2d';
+  ctx.shadowColor = c.glow;
   ctx.shadowBlur = 14;
   ctx.fill();
   ctx.restore();
@@ -339,6 +377,25 @@ function render() {
   ctx.stroke();
   ctx.restore();
 
+  // edge indicators for off-screen meteors
+  for (const m of meteors) {
+    const ix = m.x - CX, iy = m.y - CY;
+    if (Math.hypot(ix, iy) < 340) continue;
+    const ex = Math.max(16, Math.min(W - 16, m.x));
+    const ey = Math.max(16, Math.min(H - 16, m.y));
+    const ia = Math.atan2(iy, ix);
+    const icol = typeCol(m).glow;
+    const pu = 1 + Math.sin(time * 8) * 0.15;
+    ctx.save();
+    ctx.translate(ex, ey); ctx.rotate(ia);
+    ctx.globalAlpha = 0.9;
+    ctx.fillStyle = icol; ctx.shadowColor = icol; ctx.shadowBlur = 10;
+    ctx.beginPath();
+    ctx.moveTo(12 * pu, 0); ctx.lineTo(-6, -8 * pu); ctx.lineTo(-6, 8 * pu);
+    ctx.closePath(); ctx.fill();
+    ctx.restore();
+  }
+
   for (const m of meteors) drawMeteor(m);
 
   for (const p of parts) {
@@ -368,6 +425,13 @@ function render() {
 
   if (flash > 0) { ctx.fillStyle = 'rgba(255,40,40,' + (flash * 0.7) + ')'; ctx.fillRect(-20, -20, W + 40, H + 40); }
 
+  if (danger > 0.02) {
+    const dg = ctx.createRadialGradient(CX, CY, 120, CX, CY, 330);
+    dg.addColorStop(0, 'rgba(255,40,40,0)');
+    dg.addColorStop(1, 'rgba(255,40,40,' + (0.38 * danger * (0.7 + 0.3 * Math.sin(time * 10))) + ')');
+    ctx.fillStyle = dg; ctx.fillRect(-20, -20, W + 40, H + 40);
+  }
+
   // overlays
   if (state === 'title' || state === 'over' || state === 'paused') {
     ctx.fillStyle = 'rgba(4,6,16,.72)'; ctx.fillRect(-20, -20, W + 40, H + 40);
@@ -380,8 +444,9 @@ function render() {
     if (state === 'title') {
       ctx.fillText('Rotate your shield. Block the meteors.', CX, CY + 10);
       ctx.fillText('Golden meteors = shockwave bonus!', CX, CY + 34);
+      ctx.fillText('Beware speeders, tanks and splitters!', CX, CY + 58);
       ctx.fillStyle = '#54ff9f'; ctx.font = 'bold 20px Trebuchet MS';
-      ctx.fillText('— TAP TO START —', CX, CY + 90);
+      ctx.fillText('— TAP TO START —', CX, CY + 112);
     } else if (state === 'over') {
       ctx.fillText('Score: ' + score, CX, CY - 10);
       ctx.fillText('Best: ' + best, CX, CY + 14);

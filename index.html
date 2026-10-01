@@ -1,0 +1,462 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
+<title>Meteor Shield</title>
+<style>
+  * { margin:0; padding:0; box-sizing:border-box; -webkit-tap-highlight-color:transparent; }
+  html, body { background:#05060f; }
+  body {
+    font-family:'Trebuchet MS','Segoe UI',system-ui,sans-serif;
+    color:#eaf2ff; min-height:100vh;
+    display:flex; justify-content:center; align-items:flex-start;
+    background:radial-gradient(1200px 700px at 50% -10%, #141b3d 0%, #05060f 60%);
+    user-select:none; -webkit-user-select:none; touch-action:manipulation;
+  }
+  #wrap { width:100%; max-width:480px; padding:10px 12px 18px; }
+  #hud {
+    display:flex; align-items:center; justify-content:space-between;
+    padding:8px 4px; font-weight:bold;
+  }
+  .hud-box { text-align:center; min-width:64px; }
+  .hud-label { font-size:10px; letter-spacing:2px; color:#8fa3d9; }
+  .hud-val { font-size:20px; color:#fff; text-shadow:0 0 10px #4da6ff; }
+  #lives { font-size:18px; letter-spacing:2px; }
+  #pauseBtn {
+    background:#16204a; color:#fff; border:2px solid #4da6ff; border-radius:12px;
+    font-size:16px; padding:6px 12px; cursor:pointer; font-weight:bold;
+  }
+  #pauseBtn:active { transform:scale(.94); }
+  #stage {
+    position:relative; width:100%; border-radius:16px; overflow:hidden;
+    border:2px solid #27407e; box-shadow:0 0 24px rgba(77,166,255,.25);
+    background:#070a18;
+  }
+  canvas { display:block; width:100%; height:auto; }
+  #hint {
+    text-align:center; font-size:13px; color:#9fb4e8; margin:10px 4px 8px; line-height:1.5;
+  }
+  #controls { display:flex; gap:14px; justify-content:center; margin-top:2px; }
+  .ctl {
+    flex:1; max-width:200px; padding:16px 0; font-size:30px; font-weight:bold;
+    color:#fff; background:linear-gradient(180deg,#1c2c63,#101a3f);
+    border:2px solid #4da6ff; border-radius:18px; cursor:pointer;
+    box-shadow:0 4px 0 #0a1230, 0 0 16px rgba(77,166,255,.35);
+    touch-action:none;
+  }
+  .ctl:active, .ctl.pressed {
+    transform:translateY(3px); box-shadow:0 1px 0 #0a1230, 0 0 22px rgba(77,166,255,.6);
+    background:linear-gradient(180deg,#2a3f8f,#16225c);
+  }
+</style>
+</head>
+<body>
+<div id="wrap">
+  <div id="hud">
+    <div class="hud-box"><div class="hud-label">SCORE</div><div class="hud-val" id="score">0</div></div>
+    <div class="hud-box"><div class="hud-label">BEST</div><div class="hud-val" id="best">0</div></div>
+    <div class="hud-box"><div class="hud-label">LIVES</div><div id="lives">❤️❤️❤️</div></div>
+    <div class="hud-box"><div class="hud-label">LEVEL</div><div class="hud-val" id="level">1</div></div>
+    <button id="pauseBtn" title="Pause">⏸</button>
+  </div>
+  <div id="stage"><canvas id="game"></canvas></div>
+  <div id="hint">Hold <b>◀ ▶</b> or press the left / right side of the screen to rotate your shield.<br>Block every meteor — don't let them hit your planet!</div>
+  <div id="controls">
+    <button class="ctl" id="btnL">◀</button>
+    <button class="ctl" id="btnR">▶</button>
+  </div>
+</div>
+<script>
+'use strict';
+const cv = document.getElementById('game');
+const ctx = cv.getContext('2d');
+const W = 400, H = 520;
+cv.width = W; cv.height = H;
+const CX = W / 2, CY = H / 2 - 10;
+const SHIELD_R = 66, SHIELD_ARC = 1.55, PLAYER_R = 22;
+const ROT_SPEED = 6.0;
+
+/* ---------- audio ---------- */
+let AC = null;
+function audio() {
+  if (!AC) { try { AC = new (window.AudioContext || window.webkitAudioContext)(); } catch (e) {} }
+  if (AC && AC.state === 'suspended') AC.resume();
+  return AC;
+}
+function tone(freq, dur, type, vol, when) {
+  const ac = audio(); if (!ac) return;
+  const t = ac.currentTime + (when || 0);
+  const o = ac.createOscillator(), g = ac.createGain();
+  o.type = type || 'triangle'; o.frequency.setValueAtTime(freq, t);
+  g.gain.setValueAtTime(vol || 0.18, t);
+  g.gain.exponentialRampToValueAtTime(0.001, t + dur);
+  o.connect(g); g.connect(ac.destination);
+  o.start(t); o.stop(t + dur + 0.02);
+}
+function noiseBurst(dur, vol) {
+  const ac = audio(); if (!ac) return;
+  const n = Math.floor(ac.sampleRate * dur);
+  const buf = ac.createBuffer(1, n, ac.sampleRate);
+  const d = buf.getChannelData(0);
+  for (let i = 0; i < n; i++) d[i] = (Math.random() * 2 - 1) * (1 - i / n);
+  const s = ac.createBufferSource(); s.buffer = buf;
+  const g = ac.createGain(); g.gain.value = vol || 0.25;
+  const f = ac.createBiquadFilter(); f.type = 'lowpass'; f.frequency.value = 900;
+  s.connect(f); f.connect(g); g.connect(ac.destination); s.start();
+}
+const sfx = {
+  block(c)   { tone(Math.min(420 + c * 18, 1200), 0.12, 'square', 0.10); tone(Math.min(840 + c * 30, 2200), 0.08, 'sine', 0.08); },
+  golden()   { [523, 659, 784, 1047].forEach((f, i) => tone(f, 0.16, 'triangle', 0.16, i * 0.07)); },
+  hit()      { noiseBurst(0.35, 0.35); tone(110, 0.4, 'sawtooth', 0.20); },
+  level()    { [392, 523, 659, 784].forEach((f, i) => tone(f, 0.14, 'triangle', 0.15, i * 0.09)); },
+  life()     { tone(660, 0.12, 'sine', 0.15); tone(990, 0.2, 'sine', 0.15, 0.1); },
+  over()     { [440, 349, 294, 220].forEach((f, i) => tone(f, 0.25, 'sawtooth', 0.12, i * 0.18)); },
+  start()    { tone(330, 0.1, 'triangle', 0.15); tone(660, 0.15, 'triangle', 0.15, 0.09); }
+};
+
+/* ---------- state ---------- */
+let state = 'title';
+let score = 0, best = parseInt(localStorage.getItem('meteorShieldBest') || '0', 10) || 0;
+let lives = 3, level = 1, combo = 0, blocks = 0;
+let shieldAngle = -Math.PI / 2;
+let meteors = [], parts = [], popups = [], stars = [];
+let spawnT = 0, spawnGap = 0.95, speedMul = 1;
+let shake = 0, flash = 0, nextLifeAt = 2500, newBest = false;
+let rot = { left: false, right: false };
+let time = 0;
+
+for (let i = 0; i < 90; i++) {
+  stars.push({ x: Math.random() * W, y: Math.random() * H, r: Math.random() * 1.6 + 0.4, tw: Math.random() * 6.28 });
+}
+
+function reset() {
+  score = 0; lives = 3; level = 1; combo = 0; blocks = 0;
+  shieldAngle = -Math.PI / 2;
+  meteors = []; parts = []; popups = [];
+  spawnT = 0.4; spawnGap = 0.95; speedMul = 1;
+  shake = 0; flash = 0; nextLifeAt = 2500; newBest = false;
+  updateHUD();
+}
+function startGame() { audio(); reset(); state = 'playing'; sfx.start(); }
+function updateHUD() {
+  document.getElementById('score').textContent = score;
+  document.getElementById('best').textContent = best;
+  document.getElementById('level').textContent = level;
+  document.getElementById('lives').textContent = '❤️'.repeat(Math.max(0, lives)) + '🖤'.repeat(Math.max(0, 5 - lives));
+}
+function addPopup(x, y, text, color, size) {
+  popups.push({ x, y, text, color: color || '#fff', size: size || 16, life: 1 });
+}
+function boom(x, y, color, n, spd) {
+  for (let i = 0; i < (n || 14); i++) {
+    const a = Math.random() * 6.28, s = (spd || 160) * (0.3 + Math.random() * 0.9);
+    parts.push({ x, y, vx: Math.cos(a) * s, vy: Math.sin(a) * s, r: 1.5 + Math.random() * 3, life: 1, color });
+  }
+}
+function normAngle(a) {
+  while (a > Math.PI) a -= Math.PI * 2;
+  while (a < -Math.PI) a += Math.PI * 2;
+  return a;
+}
+
+/* ---------- gameplay ---------- */
+function spawnMeteor() {
+  const a = Math.random() * Math.PI * 2;
+  const dist = 400;
+  const x = CX + Math.cos(a) * dist, y = CY + Math.sin(a) * dist;
+  const golden = Math.random() < 0.06;
+  const sp = (125 + Math.random() * 45 + (level - 1) * 16) * speedMul;
+  meteors.push({
+    x, y, vx: -Math.cos(a) * sp, vy: -Math.sin(a) * sp,
+    r: golden ? 15 : 10 + Math.random() * 7,
+    golden, spin: Math.random() * 6.28, passed: false,
+    hue: 8 + Math.random() * 22
+  });
+}
+function blockMeteor(m, idx) {
+  const gain = 10 + combo;
+  score += gain; combo++; blocks++;
+  const ma = Math.atan2(m.y - CY, m.x - CX);
+  const bx = CX + Math.cos(ma) * SHIELD_R, by = CY + Math.sin(ma) * SHIELD_R;
+  boom(bx, by, m.golden ? '#ffd94d' : '#ff9a3d', m.golden ? 30 : 16, 200);
+  addPopup(bx, by - 14, '+' + gain, m.golden ? '#ffd94d' : '#fff');
+  sfx.block(combo);
+  shake = Math.max(shake, 3);
+  if (m.golden) {
+    sfx.golden();
+    addPopup(CX, CY - 110, 'SHOCKWAVE!', '#ffd94d', 26);
+    boom(CX, CY, '#ffd94d', 40, 320);
+    shake = 10;
+    for (let i = meteors.length - 1; i >= 0; i--) {
+      if (i === idx) continue;
+      const o = meteors[i];
+      boom(o.x, o.y, '#ff9a3d', 12, 180);
+      score += 25; combo++;
+    }
+    meteors = [];
+  }
+  if (blocks >= 20) {
+    blocks = 0; level++;
+    spawnGap = Math.max(0.28, spawnGap * 0.88);
+    speedMul += 0.08;
+    addPopup(CX, CY - 140, 'LEVEL ' + level + '!', '#4da6ff', 28);
+    sfx.level();
+    updateHUD();
+  }
+  if (score >= nextLifeAt) {
+    nextLifeAt += 2500;
+    if (lives < 5) { lives++; addPopup(CX, CY - 80, '+1 LIFE', '#ff6b9d', 22); sfx.life(); }
+  }
+  if (score > best) { best = score; newBest = true; localStorage.setItem('meteorShieldBest', String(best)); }
+  updateHUD();
+}
+function hitPlayer(m) {
+  lives--; combo = 0;
+  boom(m.x, m.y, '#ff4d4d', 26, 240);
+  flash = 0.55;
+  sfx.hit();
+  addPopup(CX, CY + 60, lives > 0 ? 'OUCH!' : '', '#ff4d4d', 24);
+  updateHUD();
+  if (lives <= 0) {
+    state = 'over';
+    shake = 0;
+    boom(CX, CY, '#4da6ff', 60, 300);
+    sfx.over();
+  } else {
+    shake = 14;
+  }
+}
+function update(dt) {
+  time += dt;
+  if (rot.left) shieldAngle -= ROT_SPEED * dt;
+  if (rot.right) shieldAngle += ROT_SPEED * dt;
+
+  spawnT -= dt;
+  if (spawnT <= 0) { spawnMeteor(); spawnT = spawnGap * (0.7 + Math.random() * 0.6); }
+
+  for (let i = meteors.length - 1; i >= 0; i--) {
+    const m = meteors[i];
+    m.x += m.vx * dt; m.y += m.vy * dt; m.spin += dt * 4;
+    if (Math.random() < 0.5) {
+      parts.push({ x: m.x - m.vx * 0.03, y: m.y - m.vy * 0.03, vx: -m.vx * 0.1 + (Math.random() - 0.5) * 40, vy: -m.vy * 0.1 + (Math.random() - 0.5) * 40, r: 1 + Math.random() * 2.5, life: 0.7, color: m.golden ? '#ffd94d' : '#ff7a2d' });
+    }
+    const dx = m.x - CX, dy = m.y - CY;
+    const d = Math.hypot(dx, dy);
+    if (!m.passed && d <= SHIELD_R + m.r) {
+      const ma = Math.atan2(dy, dx);
+      if (Math.abs(normAngle(ma - shieldAngle)) <= SHIELD_ARC / 2) {
+        blockMeteor(m, i);
+        meteors.splice(i, 1);
+        continue;
+      } else { m.passed = true; }
+    }
+    if (d <= PLAYER_R + m.r) {
+      hitPlayer(m);
+      meteors.splice(i, 1);
+      if (state === 'over') return;
+      continue;
+    }
+    if (d > 460) meteors.splice(i, 1);
+  }
+  for (let i = parts.length - 1; i >= 0; i--) {
+    const p = parts[i];
+    p.x += p.vx * dt; p.y += p.vy * dt; p.vx *= 0.98; p.vy *= 0.98; p.life -= dt * 1.6;
+    if (p.life <= 0) parts.splice(i, 1);
+  }
+  if (parts.length > 500) parts.splice(0, parts.length - 500);
+  for (let i = popups.length - 1; i >= 0; i--) {
+    const p = popups[i];
+    p.y -= 42 * dt; p.life -= dt * 1.1;
+    if (p.life <= 0) popups.splice(i, 1);
+  }
+  shake = Math.max(0, shake - dt * 30);
+  flash = Math.max(0, flash - dt * 1.8);
+}
+
+/* ---------- render ---------- */
+function drawMeteor(m) {
+  ctx.save();
+  ctx.translate(m.x, m.y);
+  ctx.rotate(m.spin);
+  const g = ctx.createRadialGradient(0, 0, 1, 0, 0, m.r);
+  if (m.golden) { g.addColorStop(0, '#fff6c9'); g.addColorStop(0.5, '#ffd94d'); g.addColorStop(1, '#b8860b'); }
+  else { g.addColorStop(0, '#ffb37a'); g.addColorStop(0.5, '#e05a2b'); g.addColorStop(1, '#7a2b12'); }
+  ctx.fillStyle = g;
+  ctx.beginPath();
+  const n = 8;
+  for (let i = 0; i <= n; i++) {
+    const a = (i / n) * Math.PI * 2;
+    const rr = m.r * (0.85 + 0.15 * Math.sin(a * 3 + m.spin));
+    i ? ctx.lineTo(Math.cos(a) * rr, Math.sin(a) * rr) : ctx.moveTo(Math.cos(a) * rr, Math.sin(a) * rr);
+  }
+  ctx.closePath(); ctx.fill();
+  ctx.shadowColor = m.golden ? '#ffd94d' : '#ff7a2d';
+  ctx.shadowBlur = 14;
+  ctx.fill();
+  ctx.restore();
+}
+function render() {
+  ctx.save();
+  if (shake > 0) ctx.translate((Math.random() - 0.5) * shake, (Math.random() - 0.5) * shake);
+
+  const bg = ctx.createLinearGradient(0, 0, 0, H);
+  bg.addColorStop(0, '#0a1030'); bg.addColorStop(1, '#05060f');
+  ctx.fillStyle = bg; ctx.fillRect(-20, -20, W + 40, H + 40);
+
+  for (const s of stars) {
+    const a = 0.35 + 0.65 * Math.abs(Math.sin(time * 1.5 + s.tw));
+    ctx.globalAlpha = a; ctx.fillStyle = '#cfe2ff';
+    ctx.beginPath(); ctx.arc(s.x, s.y, s.r, 0, 6.29); ctx.fill();
+  }
+  ctx.globalAlpha = 1;
+
+  // player planet
+  const pulse = 1 + Math.sin(time * 4) * 0.05;
+  ctx.save();
+  ctx.shadowColor = '#4da6ff'; ctx.shadowBlur = 26;
+  const pg = ctx.createRadialGradient(CX - 6, CY - 6, 2, CX, CY, PLAYER_R * pulse);
+  pg.addColorStop(0, '#bfe3ff'); pg.addColorStop(0.55, '#4da6ff'); pg.addColorStop(1, '#1c3f9e');
+  ctx.fillStyle = pg;
+  ctx.beginPath(); ctx.arc(CX, CY, PLAYER_R * pulse, 0, 6.29); ctx.fill();
+  ctx.restore();
+  // ring
+  ctx.save();
+  ctx.strokeStyle = 'rgba(160,200,255,.5)'; ctx.lineWidth = 3;
+  ctx.beginPath(); ctx.ellipse(CX, CY, PLAYER_R + 10, (PLAYER_R + 10) * 0.42, -0.4, 0, 6.29); ctx.stroke();
+  ctx.restore();
+
+  // shield arc
+  ctx.save();
+  ctx.strokeStyle = '#54ff9f'; ctx.lineWidth = 10; ctx.lineCap = 'round';
+  ctx.shadowColor = '#54ff9f'; ctx.shadowBlur = 18;
+  ctx.beginPath();
+  ctx.arc(CX, CY, SHIELD_R, shieldAngle - SHIELD_ARC / 2, shieldAngle + SHIELD_ARC / 2);
+  ctx.stroke();
+  ctx.strokeStyle = 'rgba(255,255,255,.85)'; ctx.lineWidth = 3; ctx.shadowBlur = 0;
+  ctx.beginPath();
+  ctx.arc(CX, CY, SHIELD_R, shieldAngle - SHIELD_ARC / 2, shieldAngle + SHIELD_ARC / 2);
+  ctx.stroke();
+  ctx.restore();
+
+  for (const m of meteors) drawMeteor(m);
+
+  for (const p of parts) {
+    ctx.globalAlpha = Math.max(0, p.life);
+    ctx.fillStyle = p.color;
+    ctx.beginPath(); ctx.arc(p.x, p.y, p.r * p.life + 0.5, 0, 6.29); ctx.fill();
+  }
+  ctx.globalAlpha = 1;
+
+  ctx.textAlign = 'center';
+  for (const p of popups) {
+    ctx.globalAlpha = Math.max(0, Math.min(1, p.life * 1.6));
+    ctx.font = 'bold ' + p.size + 'px Trebuchet MS';
+    ctx.fillStyle = p.color;
+    ctx.shadowColor = p.color; ctx.shadowBlur = 10;
+    ctx.fillText(p.text, p.x, p.y);
+  }
+  ctx.globalAlpha = 1; ctx.shadowBlur = 0;
+
+  // combo badge
+  if (state === 'playing' && combo >= 5) {
+    ctx.font = 'bold 22px Trebuchet MS';
+    ctx.fillStyle = '#ffd94d'; ctx.shadowColor = '#ffd94d'; ctx.shadowBlur = 12;
+    ctx.fillText('COMBO x' + combo, CX, 34);
+    ctx.shadowBlur = 0;
+  }
+
+  if (flash > 0) { ctx.fillStyle = 'rgba(255,40,40,' + (flash * 0.7) + ')'; ctx.fillRect(-20, -20, W + 40, H + 40); }
+
+  // overlays
+  if (state === 'title' || state === 'over' || state === 'paused') {
+    ctx.fillStyle = 'rgba(4,6,16,.72)'; ctx.fillRect(-20, -20, W + 40, H + 40);
+    ctx.fillStyle = '#ffd94d'; ctx.shadowColor = '#ffd94d'; ctx.shadowBlur = 16;
+    ctx.font = 'bold 40px Trebuchet MS';
+    ctx.fillText(state === 'title' ? 'METEOR' : state === 'over' ? 'GAME OVER' : 'PAUSED', CX, CY - 90);
+    ctx.fillText(state === 'title' ? 'SHIELD' : '', CX, CY - 48);
+    ctx.shadowBlur = 0;
+    ctx.fillStyle = '#eaf2ff'; ctx.font = '16px Trebuchet MS';
+    if (state === 'title') {
+      ctx.fillText('Rotate your shield. Block the meteors.', CX, CY + 10);
+      ctx.fillText('Golden meteors = shockwave bonus!', CX, CY + 34);
+      ctx.fillStyle = '#54ff9f'; ctx.font = 'bold 20px Trebuchet MS';
+      ctx.fillText('— TAP TO START —', CX, CY + 90);
+    } else if (state === 'over') {
+      ctx.fillText('Score: ' + score, CX, CY - 10);
+      ctx.fillText('Best: ' + best, CX, CY + 14);
+      if (newBest) { ctx.fillStyle = '#ffd94d'; ctx.font = 'bold 20px Trebuchet MS'; ctx.fillText('★ NEW BEST! ★', CX, CY + 44); }
+      ctx.fillStyle = '#54ff9f'; ctx.font = 'bold 20px Trebuchet MS';
+      ctx.fillText('— TAP TO PLAY AGAIN —', CX, CY + 92);
+    } else {
+      ctx.fillStyle = '#54ff9f'; ctx.font = 'bold 20px Trebuchet MS';
+      ctx.fillText('— TAP TO RESUME —', CX, CY + 40);
+    }
+  }
+  ctx.restore();
+}
+
+/* ---------- loop ---------- */
+let last = 0;
+function frame(t) {
+  const dt = Math.min(0.05, (t - last) / 1000 || 0.016);
+  last = t;
+  if (state === 'playing') update(dt);
+  else time += dt;
+  render();
+  requestAnimationFrame(frame);
+}
+updateHUD();
+requestAnimationFrame(frame);
+
+/* ---------- input ---------- */
+function bindHold(el, key) {
+  const on = e => { e.preventDefault(); audio(); rot[key] = true; el.classList.add('pressed'); };
+  const off = e => { e.preventDefault(); rot[key] = false; el.classList.remove('pressed'); };
+  el.addEventListener('pointerdown', on);
+  el.addEventListener('pointerup', off);
+  el.addEventListener('pointercancel', off);
+  el.addEventListener('pointerleave', off);
+  el.addEventListener('contextmenu', e => e.preventDefault());
+}
+bindHold(document.getElementById('btnL'), 'left');
+bindHold(document.getElementById('btnR'), 'right');
+
+let canvasTouch = null;
+cv.addEventListener('pointerdown', e => {
+  e.preventDefault(); audio();
+  if (state === 'title' || state === 'over') { startGame(); return; }
+  if (state === 'paused') { state = 'playing'; return; }
+  const r = cv.getBoundingClientRect();
+  const x = (e.clientX - r.left) / r.width;
+  canvasTouch = x < 0.5 ? 'left' : 'right';
+  rot[canvasTouch] = true;
+});
+const endTouch = e => { if (canvasTouch) { rot[canvasTouch] = false; canvasTouch = null; } };
+cv.addEventListener('pointerup', endTouch);
+cv.addEventListener('pointercancel', endTouch);
+cv.addEventListener('pointerleave', endTouch);
+
+document.getElementById('pauseBtn').addEventListener('click', e => {
+  e.preventDefault(); audio();
+  if (state === 'playing') state = 'paused';
+  else if (state === 'paused') state = 'playing';
+});
+window.addEventListener('keydown', e => {
+  if (e.key === 'ArrowLeft' || e.key === 'a' || e.key === 'A') rot.left = true;
+  if (e.key === 'ArrowRight' || e.key === 'd' || e.key === 'D') rot.right = true;
+  if ((e.key === ' ' || e.key === 'Enter')) {
+    audio();
+    if (state === 'title' || state === 'over') startGame();
+    else if (state === 'paused') state = 'playing';
+  }
+  if (['ArrowLeft', 'ArrowRight', ' '].includes(e.key)) e.preventDefault();
+});
+window.addEventListener('keyup', e => {
+  if (e.key === 'ArrowLeft' || e.key === 'a' || e.key === 'A') rot.left = false;
+  if (e.key === 'ArrowRight' || e.key === 'd' || e.key === 'D') rot.right = false;
+});
+document.addEventListener('visibilitychange', () => { if (document.hidden && state === 'playing') state = 'paused'; });
+</script>
+</body>
+</html>
